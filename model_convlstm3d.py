@@ -219,36 +219,31 @@ class ConvLSTM3D(nn.Module):
     # -----------------------------------------------------------------
 
     def forecast(self, x_init, Q):
-
+        """
+        Gera previsões multi-horizonte SEM estimar precipitação.
+        Apenas SPI é previsto; PR é mantida constante (último valor observado).
+        """
         B, P, C, H, W = x_init.shape
         predictions = []
         current_window = x_init.clone()
 
         for step in range(Q):
-
             spi_pred = self.forward_one_step(current_window)
             predictions.append(spi_pred.unsqueeze(1))
 
+            # Criar nova entrada apenas com SPI previsto
             new_in = torch.zeros(B, 1, C, H, W, device=x_init.device)
-
-            # Smoothed PR
-            if P >= 2:
-                pr_last = current_window[:, -1, 0]
-                pr_prev = current_window[:, -2, 0]
-                new_in[:, 0, 0] = 0.7 * pr_last + 0.3 * pr_prev
-            else:
-                new_in[:, 0, 0] = current_window[:, -1, 0]
-
-            # Predicted SPI
+            
+            # PR: mantém o último valor observado
+            new_in[:, 0, 0] = current_window[:, -1, 0]  # PR constante
+            
+            # SPI: valor previsto
             new_in[:, 0, 1] = spi_pred
-
-            # ΔSPI
+            
+            # ΔSPI: diferença entre SPI previsto e último observado
             last_spi = current_window[:, -1, 1]
             new_in[:, 0, 2] = spi_pred - last_spi
 
-            current_window = torch.cat(
-                [current_window[:, 1:], new_in],
-                dim=1
-            )
+            current_window = torch.cat([current_window[:, 1:], new_in], dim=1)
 
         return torch.cat(predictions, dim=1)

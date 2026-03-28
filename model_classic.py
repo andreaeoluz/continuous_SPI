@@ -68,26 +68,18 @@ def train_classic_onestep_optimized(model_name, X_train, Y_train_seq):
 
 def update_window(current_window, spi_pred):
     """
-    Updates temporal window for autoregressive forecasting.
-    
-    Args:
-        current_window: [P, 3] (PR, SPI, ΔSPI)
-        spi_pred: Predicted SPI value
-    
-    Returns:
-        Updated window
+    Atualiza janela temporal SEM estimar precipitação.
     """
     P = current_window.shape[0]
     new_row = np.zeros((1, 3), dtype=np.float32)
 
-    if P >= 2:
-        pr_last = current_window[-1, 0]
-        pr_prev = current_window[-2, 0]
-        new_row[0, 0] = 0.7 * pr_last + 0.3 * pr_prev
-    else:
-        new_row[0, 0] = current_window[-1, 0]
+    # PR: mantém o último valor observado (não estima)
+    new_row[0, 0] = current_window[-1, 0]
 
+    # SPI: valor previsto
     new_row[0, 1] = spi_pred
+    
+    # ΔSPI: diferença
     new_row[0, 2] = spi_pred - current_window[-1, 1]
 
     return np.vstack([current_window[1:], new_row])
@@ -95,15 +87,7 @@ def update_window(current_window, spi_pred):
 
 def forecast_autoregressive(model, X_init, P, Q):
     """
-    Generates multi-horizon forecasts via rolling.
-    
-    Args:
-        X_init: [N, 3P]
-        P: Historical steps
-        Q: Horizon
-    
-    Returns:
-        preds_all: [N, Q]
+    Gera previsões multi-horizonte SEM estimar precipitação.
     """
     N = X_init.shape[0]
     preds_all = np.zeros((N, Q), dtype=np.float32)

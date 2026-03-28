@@ -13,7 +13,9 @@ from visualization_spi_classes import generate_visualizations
 
 from data_preparation import (
     create_datasets,
-    prepare_classic_data
+    prepare_classic_data,
+    create_datasets_unified, 
+    prepare_classic_data_unified
 )
 
 from model_convlstm3d import ConvLSTM3D
@@ -31,7 +33,7 @@ METRICS_DIR = os.path.join(BASE_DIR, "metrics")
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(METRICS_DIR, exist_ok=True)
 
-DATA_PATH = "data/pr_Area1.xlsx"
+DATA_PATH = "data/pr_Area2.xlsx"
 SPLIT_DATE = "2018-01-01"
 SPI_SCALE = 3
 
@@ -91,8 +93,8 @@ if __name__ == "__main__":
             os.makedirs(combo_dir, exist_ok=True)
 
             # Datasets
-            ds_train, ds_val = create_datasets(
-                df_pr, df_spi, P, Q, SPLIT_DATE
+            ds_train, ds_val = create_datasets_unified(
+                df_pr, df_spi, P, Q, SPLIT_DATE, mode="full"
             )
 
             # ConvLSTM3D
@@ -150,9 +152,8 @@ if __name__ == "__main__":
 
             # Classical models
             X_train, Y_train_seq, X_val, Y_val_seq, H, W = (
-                prepare_classic_data(
-                    df_pr, df_spi, P, Q, SPLIT_DATE,
-                    sampling_rate=0.1, max_samples=50000, random_seed=123
+                prepare_classic_data_unified(
+                    df_pr, df_spi, P, Q, SPLIT_DATE
                 )
             )
 
@@ -214,6 +215,8 @@ if __name__ == "__main__":
 
     # Global results
     df_results = pd.DataFrame(results_global)
+    
+    excel_path = None  
 
     if not df_results.empty:
         
@@ -232,7 +235,7 @@ if __name__ == "__main__":
 
         df_wi_long = pd.DataFrame(rows_wi_h)
 
-        excel_path = os.path.join(METRICS_DIR, "all_models_metrics.xlsx")
+        excel_path = os.path.join(METRICS_DIR, "all_models_metrics.xlsx")  # <-- MOVER PARA DENTRO DO IF
         
         with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
             df_global.to_excel(writer, sheet_name="Global_Metrics", index=False)
@@ -245,5 +248,5 @@ if __name__ == "__main__":
     print("EXPERIMENT COMPLETED")
     print("=" * 70)
     print(f"Total time: {elapsed:.1f} min")
-    if excel_path:
+    if excel_path:  # <-- AGORA excel_path ESTÁ DEFINIDA
         print(f"Results saved to: {excel_path}")

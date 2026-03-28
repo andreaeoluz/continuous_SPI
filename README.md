@@ -1,112 +1,32 @@
-# SPI Forecasting Framework
+# 🌾 SPI Forecasting Framework
 
-Experimental framework for **multi-horizon forecasting of the Standardized Precipitation Index (SPI)** using classical machine learning models and deep learning.
+**Multi-horizon drought forecasting** using deep learning and classical machine learning.
 
-This repository contains the scripts used to conduct experiments for **spatio-temporal drought forecasting**.
-
----
-
-## 🌍 Overview
-
-Drought prediction is essential for water resource management and climate risk mitigation.  
-This framework enables systematic experiments for **SPI forecasting across multiple temporal configurations**, comparing classical machine learning and deep learning approaches.
-
-Key features:
-
-- Multi-horizon SPI forecasting  
-- Flexible historical input windows  
-- Leakage-safe SPI computation  
-- Comparison between classical ML and deep learning models  
-- Spatial evaluation and visualization of predictions  
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-1.9+-ee4c2c.svg)](https://pytorch.org/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ---
 
-## ⚙️ Experimental Configuration
+## 🎯 What is this?
 
-The framework evaluates combinations of:
+A complete experimental framework for **predicting drought conditions** using the Standardized Precipitation Index (SPI). The framework combines:
 
-**Historical window size**
-
-P = {3, 6, 9, 12, 15, 18, 21, 24} months
-
-**Forecast horizons**
-
-Q = {1, 3, 6, 9, 12} months
-
-Total experiments: 40 configurations
-
+- **ConvLSTM3D** with attention mechanisms (temporal, spatial, channel)
+- **Random Forest** and **XGBoost** with autoregressive forecasting
+- Leakage-free SPI computation
+- Systematic evaluation across multiple time horizons
 
 ---
 
-## 🧠 Implemented Models
-
-### Deep Learning
-
-- **ConvLSTM3D**
-- Temporal attention
-- Spatial attention
-- Channel attention
-
-### Classical Machine Learning
-
-- **Random Forest**
-- **XGBoost**
-
-Classical models generate **multi-horizon forecasts using an autoregressive strategy**.
-
----
-
-## 📁 Repository Structure
-SPI-Forecasting-Framework
-│
-├── main.py # Main experimental pipeline
-│
-├── dataset.py # Dataset for SPI forecasting
-│
-├── data_preparation.py # Dataset preparation and sampling
-│
-├── utils_data.py # SPI computation (no data leakage)
-│
-├── model_convlstm3d.py # ConvLSTM3D architecture
-│
-├── model_classic.py # Random Forest and XGBoost models
-│
-├── train_model.py # Training and evaluation routines
-│
-├── visualization_spi_classes.py # Spatial visualization and metrics
-│
-├── data/
-│ └── precipitation datasets
-│
-└── EXPERIMENTS/
-└── saved models, metrics and figures
-
-
----
-
-## 📊 Evaluation Metrics
-
-Model performance is evaluated using:
-
-- **Willmott Index (WI)**
-- **Root Mean Square Error (RMSE)**
-- **Mean Absolute Error (MAE)**
-- **Nash–Sutcliffe Efficiency (NSE)**
-- **Bias**
-
-The framework also supports **SPI categorical evaluation** using WMO drought classes.
-
----
-
-## 🚀 Running the Framework
-
-Edit the dataset path in `main.py`:
+## 🚀 Quick Start
 
 ```python
+# 1. Set your data path
 DATA_PATH = "data/pr_Area1.xlsx"
 
-Run the experiments: python main.py
+# 2. Run experiments
+python main.py
 
-📈 Output
-
-Results are stored in: EXPERIMENTS/
+# Generate the monthly maps
+generate_monthly_maps.py

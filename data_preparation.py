@@ -4,32 +4,87 @@ Data preparation for deep learning and classical models.
 
 import numpy as np
 import random
+import pandas as pd  # <-- ADICIONAR ESTA LINHA
 from dataset import SPIDataset
+from dataset_unified import UnifiedSPIDataset  # <-- ADICIONAR ESTA LINHA
 
 
 def create_datasets(df_pr, df_spi, P, Q, split_date):
+    """Creates training and validation datasets for DL models."""
+    ds_train = SPIDataset(df_pr, df_spi, P, Q, train=True, split_date=split_date)
+    ds_val = SPIDataset(df_pr, df_spi, P, Q, train=False, split_date=split_date)
+    return ds_train, ds_val
+
+
+def create_datasets_unified(df_pr, df_spi, P, Q, split_date, mode="full"):
     """
-    Creates training and validation datasets for DL models.
+    Creates datasets with unified mode between DL and classical models.
     
     Args:
-        df_pr: Precipitation DataFrame
-        df_spi: SPI DataFrame
-        P: Historical steps
-        Q: Forecast horizon
-        split_date: Training/validation cutoff date
-        
-    Returns:
-        ds_train, ds_val: Training and validation datasets
+        mode: "full" (DL) or "sampled" (classical)
     """
-    ds_train = SPIDataset(
-        df_pr, df_spi, P, Q, train=True, split_date=split_date
+    ds_train = UnifiedSPIDataset(
+        df_pr, df_spi, P, Q, 
+        train=True, 
+        split_date=split_date,
+        sampling_mode=mode,
+        sampling_rate=0.1 if mode == "sampled" else 1.0,
+        max_samples=50000 if mode == "sampled" else None
     )
-
-    ds_val = SPIDataset(
-        df_pr, df_spi, P, Q, train=False, split_date=split_date
+    
+    ds_val = UnifiedSPIDataset(
+        df_pr, df_spi, P, Q, 
+        train=False, 
+        split_date=split_date,
+        sampling_mode=mode,
+        sampling_rate=0.1 if mode == "sampled" else 1.0,
+        max_samples=12500 if mode == "sampled" else None
     )
-
+    
     return ds_train, ds_val
+
+
+def prepare_classic_data_unified(df_pr, df_spi, P, Q, split_date):
+    """
+    Unified version using the same dataset base.
+    """
+    ds_train, ds_val = create_datasets_unified(
+        df_pr, df_spi, P, Q, split_date, mode="sampled"
+    )
+    
+    # Extract tabular data
+    X_train = []
+    Y_train = []
+    for i in range(len(ds_train)):
+        x, y = ds_train[i]
+        X_train.append(x)
+        Y_train.append(y)
+    
+    X_val = []
+    Y_val = []
+    for i in range(len(ds_val)):
+        x, y = ds_val[i]
+        X_val.append(x)
+        Y_val.append(y)
+    
+    if len(X_train) > 0:
+        X_train = np.array(X_train, dtype=np.float32)
+        Y_train = np.array(Y_train, dtype=np.float32)
+    else:
+        X_train = np.empty((0, 3 * P), dtype=np.float32)
+        Y_train = np.empty((0, Q), dtype=np.float32)
+    
+    if len(X_val) > 0:
+        X_val = np.array(X_val, dtype=np.float32)
+        Y_val = np.array(Y_val, dtype=np.float32)
+    else:
+        X_val = np.empty((0, 3 * P), dtype=np.float32)
+        Y_val = np.empty((0, Q), dtype=np.float32)
+    
+    H = ds_train.H if hasattr(ds_train, 'H') else 1
+    W = ds_train.W if hasattr(ds_train, 'W') else 1
+    
+    return X_train, Y_train, X_val, Y_val, H, W
 
 
 def prepare_classic_data(
@@ -42,28 +97,12 @@ def prepare_classic_data(
     max_samples=50000,
     random_seed=123
 ):
-    """
-    Prepares tabular data for classical models with spatial sampling.
-    
-    Args:
-        sampling_rate: Fraction of pixels to sample per timestep
-        max_samples: Maximum total number of samples
-        random_seed: Seed for reproducibility
-    
-    Returns:
-        X_train, Y_train_seq, X_val, Y_val_seq, H, W
-    """
-    
+    """Prepares tabular data for classical models with spatial sampling."""
     random.seed(random_seed)
     np.random.seed(random_seed)
     
-    ds_train = SPIDataset(
-        df_pr, df_spi, P, Q, train=True, split_date=split_date
-    )
-    
-    ds_val = SPIDataset(
-        df_pr, df_spi, P, Q, train=False, split_date=split_date
-    )
+    ds_train = SPIDataset(df_pr, df_spi, P, Q, train=True, split_date=split_date)
+    ds_val = SPIDataset(df_pr, df_spi, P, Q, train=False, split_date=split_date)
     
     H = ds_train.pr.shape[1]
     W = ds_train.pr.shape[2]
@@ -80,10 +119,7 @@ def prepare_classic_data(
 
 
 def _extract_tabular_sampled(dataset, P, Q, sampling_rate=0.1, max_samples=50000):
-    """
-    Extracts tabular data with random pixel sampling.
-    """
-    
+    """Extracts tabular data with random pixel sampling."""
     if len(dataset) == 0:
         return (
             np.empty((0, 3 * P), dtype=np.float32),
@@ -97,7 +133,7 @@ def _extract_tabular_sampled(dataset, P, Q, sampling_rate=0.1, max_samples=50000
     pixels_per_step = int(total_pixels * sampling_rate)
     pixels_per_step = max(1, min(pixels_per_step, total_pixels))
     
-    max_pixels_per_step = max_samples // total_timesteps
+    max_pixels_per_step = max_samples // total_timesteps if total_timesteps > 0 else max_samples
     pixels_per_step = min(pixels_per_step, max_pixels_per_step)
     
     X_list = []
@@ -106,12 +142,10 @@ def _extract_tabular_sampled(dataset, P, Q, sampling_rate=0.1, max_samples=50000
     all_pixels = [(i, j) for i in range(H) for j in range(W)]
     
     for t_idx in range(total_timesteps):
-        
         x, y_seq = dataset[t_idx]
         sampled_pixels = random.sample(all_pixels, min(pixels_per_step, len(all_pixels)))
         
         for i, j in sampled_pixels:
-            
             window = x[:, :, i, j].numpy()
             features = window.reshape(-1)
             target_seq = y_seq[:, i, j].numpy()
@@ -147,17 +181,9 @@ def _extract_tabular_sampled(dataset, P, Q, sampling_rate=0.1, max_samples=50000
 
 
 def prepare_classic_data_multi(df_pr, df_spi, P, Q, split_date):
-    """
-    Version without sampling (all pixels).
-    Kept for compatibility.
-    """
-    ds_train = SPIDataset(
-        df_pr, df_spi, P, Q, train=True, split_date=split_date
-    )
-    
-    ds_val = SPIDataset(
-        df_pr, df_spi, P, Q, train=False, split_date=split_date
-    )
+    """Version without sampling (all pixels). Kept for compatibility."""
+    ds_train = SPIDataset(df_pr, df_spi, P, Q, train=True, split_date=split_date)
+    ds_val = SPIDataset(df_pr, df_spi, P, Q, train=False, split_date=split_date)
     
     X_train, Y_train_seq = _extract_tabular_full(ds_train, P, Q)
     X_val, Y_val_seq = _extract_tabular_full(ds_val, P, Q)
@@ -169,9 +195,7 @@ def prepare_classic_data_multi(df_pr, df_spi, P, Q, split_date):
 
 
 def _extract_tabular_full(dataset, P, Q):
-    """
-    Extracts all pixels without sampling.
-    """
+    """Extracts all pixels without sampling."""
     X_list = []
     Y_list = []
     

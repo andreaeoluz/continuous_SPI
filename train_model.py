@@ -124,8 +124,26 @@ def train_model(
     patience=10, min_delta=1e-3, eval_mode="last"
 ):
     """
-    Trains model with 1-step strategy and autoregressive validation.
+    Treina modelo com estratégia ONE-STEP (teacher forcing).
+    
+    IMPORTANTE: O modelo é treinado para prever APENAS o primeiro horizonte
+    (t+1). Durante a inferência, o modelo opera de forma AUTOREGRESSIVA
+    para gerar múltiplos passos (t+1 a t+Q).
+    
+    Esta divergência entre treinamento e inferência é intencional e segue
+    a prática comum em previsão de séries temporais espaciais (Rolling Forecast).
+    
+    Args:
+        model: Modelo a ser treinado
+        dataset_train: Dataset de treinamento (one-step supervision)
+        dataset_val: Dataset de validação (avaliado em multi-step)
+        Q: Horizonte de previsão (usado apenas para validação)
+        eval_mode: Modo de seleção do melhor modelo
+            - "last": usa WI do último horizonte
+            - "best_of_h": usa melhor WI entre horizontes
+            - "mean": usa média do WI entre horizontes
     """
+    
     print(f"\nTraining P={P}, Q={Q}")
 
     if len(dataset_train) == 0:
