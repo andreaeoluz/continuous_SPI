@@ -1,249 +1,301 @@
-# =====================================================================
-# model_convlstm3d.py — ConvLSTM3D + Temporal Attention (BN + Large Kernel)
-# =====================================================================
+# model_convlstm3d.py - ConvLSTM3D for SPI forecasting with delta prediction
 
 import torch
 import torch.nn as nn
 
 
-# =====================================================================
-# ConvLSTM3D Cell (with internal BatchNorm + larger kernel)
-# =====================================================================
-
 class ConvLSTM3DCell(nn.Module):
+    """ConvLSTM cell for 3D spatiotemporal processing."""
 
-    def __init__(self, in_channels, hidden_channels, kernel_size=3):
+    def __init__(self, in_channels: int, hidden_channels: int,
+                 kernel_size: int = 3, dropout: float = 0.3):
         super().__init__()
-
         padding = kernel_size // 2
+        self.in_channels = in_channels
         self.hidden_channels = hidden_channels
+        self.dropout = nn.Dropout2d(p=dropout)
 
         self.conv = nn.Conv3d(
-            in_channels + hidden_channels,
-            4 * hidden_channels,
+            in_channels + hidden_channels, 4 * hidden_channels,
             kernel_size=(1, kernel_size, kernel_size),
-            padding=(0, padding, padding),
-            bias=False
+            padding=(0, padding, padding), bias=False
         )
-
-        # 🔥 BatchNorm inside cell (stabilizes gates)
         self.bn = nn.BatchNorm3d(4 * hidden_channels)
 
-    def forward(self, x, h_prev, c_prev):
+    def forward(self, x: torch.Tensor, h_prev: torch.Tensor, c_prev: torch.Tensor):
+        """
+        Args:
+            x: [B, C, H, W] - input at current time step
+            h_prev: [B, hidden, H, W] - previous hidden state
+            c_prev: [B, hidden, H, W] - previous cell state
 
-        x3 = x.unsqueeze(2)
-        h3 = h_prev.unsqueeze(2)
-
-        combined = torch.cat([x3, h3], dim=1)
-
+        Returns:
+            h_next, c_next: updated states
+        """
+        combined = torch.cat([x.unsqueeze(2), h_prev.unsqueeze(2)], dim=1)
         gates = self.bn(self.conv(combined)).squeeze(2)
-
         i, f, o, g = torch.chunk(gates, 4, dim=1)
 
-        i = torch.sigmoid(i)
-        f = torch.sigmoid(f)
-        o = torch.sigmoid(o)
-        g = torch.tanh(g)
-
-        c_next = f * c_prev + i * g
-        h_next = o * torch.tanh(c_next)
+        c_next = torch.sigmoid(f) * c_prev + torch.sigmoid(i) * torch.tanh(g)
+        h_next = torch.sigmoid(o) * torch.tanh(c_next)
+        h_next = self.dropout(h_next)
 
         return h_next, c_next
 
 
-# =====================================================================
-# Channel Attention
-# =====================================================================
-
 class SEBlock(nn.Module):
+    """Squeeze-and-Excitation block with linear activation."""
 
-    def __init__(self, channels, reduction=8):
+    def __init__(self, channels: int, reduction: int = 8):
         super().__init__()
         self.fc1 = nn.Linear(channels, channels // reduction)
         self.fc2 = nn.Linear(channels // reduction, channels)
 
-    def forward(self, x):
-        b, c, h, w = x.shape
-        y = x.mean(dim=(2, 3))
-        y = torch.relu(self.fc1(y))
-        y = torch.sigmoid(self.fc2(y))
-        y = y.view(b, c, 1, 1)
-        return x * y
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = torch.sigmoid(self.fc2(self.fc1(x.mean(dim=(2, 3)))))
+        return x * y.view(x.size(0), -1, 1, 1)
 
-
-# =====================================================================
-# Spatial Attention
-# =====================================================================
 
 class SpatialAttention(nn.Module):
+    """Spatial attention module using mean and max pooling."""
 
-    def __init__(self):
+    def __init__(self, kernel_size: int = 5):
         super().__init__()
-        self.conv = nn.Conv2d(2, 1, kernel_size=5, padding=2)
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size // 2)
 
-    def forward(self, x):
-        avg_pool = torch.mean(x, dim=1, keepdim=True)
-        max_pool, _ = torch.max(x, dim=1, keepdim=True)
-        attn = torch.cat([avg_pool, max_pool], dim=1)
-        attn = torch.sigmoid(self.conv(attn))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        attn = torch.sigmoid(
+            self.conv(torch.cat([
+                torch.mean(x, dim=1, keepdim=True),
+                torch.max(x, dim=1, keepdim=True)[0]
+            ], dim=1))
+        )
         return x * attn
 
 
-# =====================================================================
-# ConvLSTM Encoder + Temporal Attention
-# =====================================================================
-
 class ConvLSTM3DEncoder(nn.Module):
+    """Encoder: processes input sequence and extracts spatiotemporal features."""
 
-    def __init__(self, input_dim=3, hidden_dims=(64, 48, 32)):
+    def __init__(self, input_dim: int = 3, hidden_dims: tuple = (32, 16, 8),
+                 dropout: float = None, use_checkpoint: bool = False):
         super().__init__()
-
         self.hidden_dims = hidden_dims
+        self.input_dim = input_dim
+        self.dropout = dropout
+        self.use_checkpoint = use_checkpoint
+
         self.layers = nn.ModuleList()
+        prev_dim = input_dim
+        for h in hidden_dims:
+            self.layers.append(ConvLSTM3DCell(prev_dim, h, dropout=dropout))
+            prev_dim = h
 
-        for i, hidden_dim in enumerate(hidden_dims):
-            in_channels = input_dim if i == 0 else hidden_dims[i - 1]
-            self.layers.append(
-                ConvLSTM3DCell(in_channels, hidden_dim, kernel_size=3)
-            )
+        self.skip_proj = nn.Sequential(
+            nn.Conv2d(input_dim, hidden_dims[-1], 1),
+            nn.BatchNorm2d(hidden_dims[-1])
+        )
+        self.temp_fc1 = nn.Linear(hidden_dims[-1], max(1, hidden_dims[-1] // 2))
+        self.temp_fc2 = nn.Linear(max(1, hidden_dims[-1] // 2), 1)
+        self.layer_norm = nn.LayerNorm(hidden_dims[-1])
+        self.bn_skip = nn.BatchNorm2d(hidden_dims[-1])
 
-        # 🔥 More robust temporal attention
-        self.temp_fc1 = nn.Linear(hidden_dims[-1], hidden_dims[-1] // 2)
-        self.temp_fc2 = nn.Linear(hidden_dims[-1] // 2, 1)
-
-    def forward(self, x):
-
+    def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
         B, P, C, H, W = x.shape
 
-        h_states = [
-            torch.zeros(B, h, H, W, device=x.device)
-            for h in self.hidden_dims
-        ]
+        # Downsample if resolution is too high
+        original_size = (H, W)
+        need_resize = H * W > 2048
 
-        c_states = [
-            torch.zeros(B, h, H, W, device=x.device)
-            for h in self.hidden_dims
-        ]
+        if need_resize:
+            scale_factor = min(1.0, (2048 / (H * W)) ** 0.5)
+            new_h, new_w = int(H * scale_factor), int(W * scale_factor)
+            x_reshaped = x.view(B * P, C, H, W)
+            x_reshaped = nn.functional.interpolate(
+                x_reshaped, size=(new_h, new_w), mode='bilinear', align_corners=False
+            )
+            x = x_reshaped.view(B, P, C, new_h, new_w)
+            H, W = new_h, new_w
 
-        temporal_outputs = []
+        # Initialize hidden and cell states
+        h = [torch.zeros(B, hd, H, W, device=x.device) for hd in self.hidden_dims]
+        c = [torch.zeros(B, hd, H, W, device=x.device) for hd in self.hidden_dims]
 
+        # Process sequence
+        temporal = []
         for t in range(P):
+            inp = x[:, t]
+            for i, cell in enumerate(self.layers):
+                h[i], c[i] = cell(inp, h[i], c[i])
+                inp = h[i]
+            temporal.append(h[-1])
 
-            input_t = x[:, t]
+        temporal = torch.stack(temporal, dim=1)
 
-            for layer_idx, cell in enumerate(self.layers):
+        # Temporal attention pooling
+        pooled = temporal.mean(dim=(3, 4))
+        weights = torch.softmax(self.temp_fc2(self.temp_fc1(pooled)), dim=1)
+        weighted = (temporal * weights.unsqueeze(-1).unsqueeze(-1)).sum(dim=1)
 
-                h_states[layer_idx], c_states[layer_idx] = cell(
-                    input_t,
-                    h_states[layer_idx],
-                    c_states[layer_idx],
-                )
+        # Skip connection
+        skip = self.skip_proj(x[:, 0])
 
-                input_t = h_states[layer_idx]
+        if weighted.shape[2:] != skip.shape[2:]:
+            weighted = nn.functional.interpolate(
+                weighted, size=skip.shape[2:], mode='bilinear', align_corners=False
+            )
 
-            temporal_outputs.append(h_states[-1])
+        out = self.bn_skip(weighted + skip)
 
-        temporal_stack = torch.stack(temporal_outputs, dim=1)
+        if need_resize:
+            out = nn.functional.interpolate(
+                out, size=original_size, mode='bilinear', align_corners=False
+            )
 
-        pooled = temporal_stack.mean(dim=(3, 4))  # [B,P,C]
+        out = out.permute(0, 2, 3, 1)
+        out = self.layer_norm(out)
+        out = out.permute(0, 3, 1, 2)
 
-        scores = torch.relu(self.temp_fc1(pooled))
-        scores = self.temp_fc2(scores)
+        return out
 
-        weights = torch.softmax(scores, dim=1)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.use_checkpoint and self.training and hasattr(torch, 'checkpoint'):
+            return torch.utils.checkpoint.checkpoint(
+                self._forward_impl, x, use_reentrant=False
+            )
+        return self._forward_impl(x)
 
-        weights = weights.unsqueeze(-1).unsqueeze(-1)
-
-        weighted_sum = (temporal_stack * weights).sum(dim=1)
-
-        return weighted_sum
-
-
-# =====================================================================
-# Complete Model
-# =====================================================================
 
 class ConvLSTM3D(nn.Module):
+    """
+    ConvLSTM3D model for SPI forecasting using delta prediction.
 
-    def __init__(self, hidden=(64, 48, 32), dropout_p=0.2):
+    Strategy: Predict SPI variation (delta) instead of absolute values.
+    SPI_predicted = last_observed_SPI + delta_predicted
+
+    Args:
+        hidden: Tuple of hidden channels per layer
+        dropout_p: Dropout rate (default: 0.3)
+        use_checkpoint: Enable gradient checkpointing for memory efficiency
+    """
+
+    def __init__(self, hidden: tuple, dropout_p: float = 0.3, use_checkpoint: bool = False):
         super().__init__()
+        if not isinstance(hidden, (tuple, list)):
+            raise ValueError(f"hidden must be a tuple/list, got {type(hidden)}")
+
+        self.hidden_dims = hidden
+        self.dropout_p = dropout_p
+        self.use_checkpoint = use_checkpoint
 
         self.encoder = ConvLSTM3DEncoder(
             input_dim=3,
-            hidden_dims=hidden
+            hidden_dims=hidden,
+            dropout=dropout_p,
+            use_checkpoint=use_checkpoint
         )
-
         self.channel_att = SEBlock(hidden[-1])
         self.spatial_att = SpatialAttention()
 
-        self.refine = nn.Conv2d(
-            hidden[-1],
-            hidden[-1],
-            kernel_size=3,
-            padding=1
+        # Refinement block with residual connection
+        self.refine = nn.Sequential(
+            nn.Conv2d(hidden[-1], hidden[-1], 3, padding=1),
+            nn.BatchNorm2d(hidden[-1]),
+            nn.Conv2d(hidden[-1], hidden[-1], 3, padding=1),
+            nn.BatchNorm2d(hidden[-1])
         )
 
         self.dropout = nn.Dropout2d(p=dropout_p)
-        self.batch_norm = nn.BatchNorm2d(hidden[-1])
 
-        # 🔥 Deeper head
+        # Prediction head for delta SPI (variation)
         self.head = nn.Sequential(
-            nn.Conv2d(hidden[-1], 64, 3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden[-1], 128, 3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.Tanh(),
+            nn.Dropout2d(p=dropout_p),
+            nn.Conv2d(128, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.Tanh(),
             nn.Conv2d(64, 1, 1)
         )
 
-    # -----------------------------------------------------------------
-
-    def forward_one_step(self, x):
-
+    def _forward_one_step_impl(self, x: torch.Tensor) -> torch.Tensor:
+        """Predict delta SPI for the next time step."""
         h = self.encoder(x)
-
         h = self.channel_att(h)
         h = self.spatial_att(h)
 
-        h_ref = torch.relu(self.refine(h))
-        h_ref = h_ref + h
+        residual = h
+        h = self.refine(h)
+        h = h + residual
+        h = self.dropout(h)
 
-        h_ref = self.dropout(h_ref)
-        h_norm = self.batch_norm(h_ref)
+        delta_pred = self.head(h).squeeze(1)
+        return delta_pred
 
-        spi_pred = self.head(h_norm).squeeze(1)
+    def forward_one_step(self, x: torch.Tensor, use_checkpoint: bool = None) -> torch.Tensor:
+        """
+        Predict absolute SPI for the next time step.
 
-        # Global residual skip
+        Args:
+            x: Input tensor [B, P, C, H, W]
+            use_checkpoint: Override model's checkpoint setting
+
+        Returns:
+            spi_pred: Absolute SPI prediction [B, H, W]
+        """
+        if use_checkpoint is None:
+            use_checkpoint = self.use_checkpoint
+
+        if use_checkpoint and self.training and hasattr(torch, 'checkpoint'):
+            delta_pred = torch.utils.checkpoint.checkpoint(
+                self._forward_one_step_impl, x, use_reentrant=False
+            )
+        else:
+            delta_pred = self._forward_one_step_impl(x)
+
+        # SPI_pred = last_observed_SPI + delta
         last_spi = x[:, -1, 1]
-        spi_pred = spi_pred + last_spi
+        spi_pred = last_spi + delta_pred
 
         return spi_pred
 
-    # -----------------------------------------------------------------
-
-    def forecast(self, x_init, Q):
+    def forecast(self, x_init: torch.Tensor, Q: int) -> torch.Tensor:
         """
-        Gera previsões multi-horizonte SEM estimar precipitação.
-        Apenas SPI é previsto; PR é mantida constante (último valor observado).
+        Autoregressive forecast for Q steps.
+
+        Args:
+            x_init: Initial input tensor [B, P, C, H, W]
+            Q: Number of steps to forecast
+
+        Returns:
+            predictions: SPI predictions [B, Q, H, W]
         """
         B, P, C, H, W = x_init.shape
         predictions = []
-        current_window = x_init.clone()
+        current = x_init.clone()
+
+        # Constant precipitation mean from input window
+        pr_mean = current[:, :, 0].mean(dim=1, keepdim=True).squeeze(1)
 
         for step in range(Q):
-            spi_pred = self.forward_one_step(current_window)
+            spi_pred = self.forward_one_step(current, use_checkpoint=False)
             predictions.append(spi_pred.unsqueeze(1))
 
-            # Criar nova entrada apenas com SPI previsto
-            new_in = torch.zeros(B, 1, C, H, W, device=x_init.device)
-            
-            # PR: mantém o último valor observado
-            new_in[:, 0, 0] = current_window[:, -1, 0]  # PR constante
-            
-            # SPI: valor previsto
-            new_in[:, 0, 1] = spi_pred
-            
-            # ΔSPI: diferença entre SPI previsto e último observado
-            last_spi = current_window[:, -1, 1]
-            new_in[:, 0, 2] = spi_pred - last_spi
+            if step < Q - 1:
+                new_input = torch.zeros(B, 1, C, H, W, device=x_init.device, dtype=x_init.dtype)
+                new_input[:, 0, 0] = pr_mean                    # precipitation
+                new_input[:, 0, 1] = spi_pred                   # predicted SPI
+                new_input[:, 0, 2] = spi_pred - current[:, -1, 1]  # delta SPI
 
-            current_window = torch.cat([current_window[:, 1:], new_in], dim=1)
+                current = torch.cat([current[:, 1:], new_input], dim=1)
 
         return torch.cat(predictions, dim=1)
+
+    def get_config(self) -> dict:
+        """Return model configuration for logging."""
+        return {
+            "hidden_dims": self.hidden_dims,
+            "dropout_p": self.dropout_p,
+            "use_checkpoint": self.use_checkpoint,
+            "num_layers": len(self.hidden_dims)
+        }

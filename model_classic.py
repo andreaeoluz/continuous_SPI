@@ -1,125 +1,129 @@
-"""
-Classical models (Random Forest and XGBoost) for SPI forecasting.
-"""
+# model_classic.py - Classical ML models for drought forecasting (RF and XGBoost)
 
 import numpy as np
 import torch
+import warnings
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
 from xgboost import XGBRegressor
 
-from train_model import wi, rmse, mae, nse, bias
+from config import RF_SPACE, XGB_SPACE, RANDOM_SEED, CLASSIC_PARAMS
+from metrics import wi, rmse, mae
+
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
+warnings.filterwarnings('ignore', message='A column-vector y was passed')
 
 
-def create_model_optimized(model_name, dataset_size=None):
+def randomized_search(model_name: str, X_train: np.ndarray, y_train: np.ndarray,
+                      n_iter: int = None, cv: int = None):
     """
-    Creates model with parameters adjusted to dataset size.
+    Perform randomized hyperparameter search with time series cross-validation.
+
+    Args:
+        model_name: "RF" or "XGBoost"
+        X_train: Training features (n_samples, n_features)
+        y_train: Training targets (n_samples, n_outputs)
+        n_iter: Number of parameter combinations to try
+        cv: Number of cross-validation folds
+
+    Returns:
+        tuple: (best_estimator, best_params, cv_results)
     """
-    
+    n_iter = n_iter or CLASSIC_PARAMS["n_iter"]
+    cv = cv or CLASSIC_PARAMS["cv"]
+
+    if len(X_train) == 0:
+        raise ValueError("X_train is empty. Cannot run randomized_search.")
+
+    # Adjust CV splits when data is scarce
+    n_splits = max(2, min(cv, len(X_train) - 1))
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+
     if model_name == "RF":
-        if dataset_size and dataset_size > 50000:
-            return RandomForestRegressor(
-                n_estimators=80, max_depth=15, min_samples_split=10,
-                min_samples_leaf=5, max_samples=0.5, n_jobs=-12,
-                random_state=123, verbose=0,
-            )
-        elif dataset_size and dataset_size > 10000:
-            return RandomForestRegressor(
-                n_estimators=120, max_depth=20, min_samples_split=5,
-                min_samples_leaf=2, max_samples=0.7, n_jobs=-12,
-                random_state=123, verbose=0,
-            )
-        else:
-            return RandomForestRegressor(
-                n_estimators=150, max_depth=25, min_samples_split=2,
-                min_samples_leaf=1, n_jobs=-1, random_state=123, verbose=0,
-            )
+        model = RandomForestRegressor(
+            n_jobs=-1,
+            random_state=RANDOM_SEED
+        )
+        param_dist = RF_SPACE
+
+        search = RandomizedSearchCV(
+            estimator=model,
+            param_distributions=param_dist,
+            n_iter=min(n_iter, 50),
+            cv=tscv,
+            scoring="neg_root_mean_squared_error",
+            n_jobs=1,
+            random_state=RANDOM_SEED,
+            verbose=0,
+            error_score="raise",
+            refit=True
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            search.fit(X_train, y_train)
+
+        return search.best_estimator_, search.best_params_, search.cv_results_
 
     elif model_name == "XGBoost":
-        if dataset_size and dataset_size > 50000:
-            return XGBRegressor(
-                n_estimators=600, learning_rate=0.03, max_depth=5,
-                subsample=0.6, colsample_bytree=0.6, reg_lambda=2.0,
-                tree_method="hist", n_jobs=-1, random_state=123, verbosity=0,
-            )
-        else:
-            return XGBRegressor(
-                n_estimators=800, learning_rate=0.05, max_depth=6,
-                subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
-                tree_method="hist", n_jobs=-1, random_state=123, verbosity=0,
-            )
+        base_model = XGBRegressor(
+            tree_method="hist",
+            n_jobs=-1,
+            random_state=RANDOM_SEED,
+            verbosity=0
+        )
+        model = MultiOutputRegressor(base_model, n_jobs=1)
+
+        param_dist = {f"estimator__{k}": v for k, v in XGB_SPACE.items()}
+
+        search = RandomizedSearchCV(
+            estimator=model,
+            param_distributions=param_dist,
+            n_iter=min(n_iter, 50),
+            cv=tscv,
+            scoring="neg_mean_squared_error",
+            n_jobs=1,
+            random_state=RANDOM_SEED,
+            verbose=0,
+            error_score="raise",
+            refit=True
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            search.fit(X_train, y_train)
+
+        return search.best_estimator_, search.best_params_, search.cv_results_
 
     else:
-        raise ValueError(f"Unsupported model: {model_name}")
+        raise ValueError(f"Invalid model_name: {model_name}. Use 'RF' or 'XGBoost'.")
 
 
-def train_classic_onestep_optimized(model_name, X_train, Y_train_seq):
+def evaluate(model, X: np.ndarray, Y_seq: np.ndarray, Q: int) -> dict:
     """
-    Trains model for one-step forecasting.
+    Evaluate model predictions using multiple metrics.
+
+    Args:
+        model: Trained sklearn model
+        X: Input features
+        Y_seq: Ground truth targets (n_samples, Q) or (n_samples,)
+        Q: Number of forecast horizons
+
+    Returns:
+        dict: Metrics including WI, RMSE, MAE, and per-horizon WI
     """
-    if len(X_train) == 0:
-        return None
+    if len(X) == 0:
+        return {"wi": np.nan, "rmse": np.nan, "mae": np.nan, "wi_by_h": [np.nan] * Q}
 
-    model = create_model_optimized(model_name, dataset_size=len(X_train))
-    y_train = Y_train_seq[:, 0]
-    
-    model.fit(X_train, y_train)
-    return model
+    Y_pred = model.predict(X)
+    if Y_pred.ndim == 1:
+        Y_pred = Y_pred.reshape(-1, 1)
+    if Y_seq.ndim == 1:
+        Y_seq = Y_seq.reshape(-1, 1)
 
-
-def update_window(current_window, spi_pred):
-    """
-    Atualiza janela temporal SEM estimar precipitação.
-    """
-    P = current_window.shape[0]
-    new_row = np.zeros((1, 3), dtype=np.float32)
-
-    # PR: mantém o último valor observado (não estima)
-    new_row[0, 0] = current_window[-1, 0]
-
-    # SPI: valor previsto
-    new_row[0, 1] = spi_pred
-    
-    # ΔSPI: diferença
-    new_row[0, 2] = spi_pred - current_window[-1, 1]
-
-    return np.vstack([current_window[1:], new_row])
-
-
-def forecast_autoregressive(model, X_init, P, Q):
-    """
-    Gera previsões multi-horizonte SEM estimar precipitação.
-    """
-    N = X_init.shape[0]
-    preds_all = np.zeros((N, Q), dtype=np.float32)
-
-    for i in range(N):
-        window = X_init[i].reshape(P, 3).copy()
-
-        for q in range(Q):
-            features = window.reshape(1, -1)
-            spi_pred = model.predict(features)[0]
-            preds_all[i, q] = spi_pred
-            window = update_window(window, spi_pred)
-
-    return preds_all
-
-
-def evaluate_autoregressive(model, X_val, Y_val_seq, P, Q):
-    """
-    Evaluates model with autoregressive forecasting.
-    """
-    if len(X_val) == 0:
-        return {
-            "wi": np.nan, "rmse": np.nan, "mae": np.nan,
-            "nse": np.nan, "bias": np.nan, "wi_by_h": [np.nan] * Q,
-        }
-
-    Y_pred_seq = forecast_autoregressive(model, X_val, P, Q)
-
-    # Global metrics
-    yt_all = Y_val_seq.reshape(-1)
-    yp_all = Y_pred_seq.reshape(-1)
-
+    # Flatten for global metrics
+    yt_all, yp_all = Y_seq.reshape(-1), Y_pred.reshape(-1)
     mask = ~np.isnan(yt_all) & ~np.isnan(yp_all)
     yt_t = torch.tensor(yt_all[mask], dtype=torch.float32)
     yp_t = torch.tensor(yp_all[mask], dtype=torch.float32)
@@ -128,37 +132,108 @@ def evaluate_autoregressive(model, X_val, Y_val_seq, P, Q):
         "wi": float(wi(yt_t, yp_t)),
         "rmse": float(rmse(yt_t, yp_t)),
         "mae": float(mae(yt_t, yp_t)),
-        "nse": float(nse(yt_t, yp_t)),
-        "bias": float(bias(yt_t, yp_t)),
+        "wi_by_h": []
     }
 
-    # WI by horizon
-    wi_by_h = []
+    # Per-horizon metrics
     for h in range(Q):
-        yt = Y_val_seq[:, h]
-        yp = Y_pred_seq[:, h]
-        mask = ~np.isnan(yt) & ~np.isnan(yp)
-
-        if np.sum(mask) > 10:
-            yt_t = torch.tensor(yt[mask], dtype=torch.float32)
-            yp_t = torch.tensor(yp[mask], dtype=torch.float32)
-            wi_by_h.append(float(wi(yt_t, yp_t)))
+        if h < Y_seq.shape[1] and h < Y_pred.shape[1]:
+            yt = Y_seq[:, h] if Y_seq.ndim > 1 else Y_seq
+            yp = Y_pred[:, h] if Y_pred.ndim > 1 else Y_pred
+            mask = ~np.isnan(yt) & ~np.isnan(yp)
+            if np.sum(mask) > 10:
+                yt_t = torch.tensor(yt[mask], dtype=torch.float32)
+                yp_t = torch.tensor(yp[mask], dtype=torch.float32)
+                metrics["wi_by_h"].append(float(wi(yt_t, yp_t)))
+            else:
+                metrics["wi_by_h"].append(np.nan)
         else:
-            wi_by_h.append(np.nan)
+            metrics["wi_by_h"].append(np.nan)
 
-    metrics["wi_by_h"] = wi_by_h
     return metrics
 
 
-def run_classic(model_name, X_train, Y_train_seq, X_val, Y_val_seq, P, Q):
+def evaluate_with_fallback(model, X_test: np.ndarray, Y_test: np.ndarray,
+                           X_val: np.ndarray, Y_val: np.ndarray,
+                           Q: int, min_samples: int = 1, test_source: str = "test") -> dict:
     """
-    Complete pipeline for classical models.
+    Evaluate model using test data if available, otherwise fall back to validation.
+
+    Args:
+        model: Trained model
+        X_test, Y_test: Test data
+        X_val, Y_val: Validation data
+        Q: Number of forecast horizons
+        min_samples: Minimum required samples for evaluation
+        test_source: Source identifier for logging
+
+    Returns:
+        dict: Evaluation metrics with metadata
     """
-    model = train_classic_onestep_optimized(model_name, X_train, Y_train_seq)
+    if len(X_test) >= min_samples and test_source == "test":
+        metrics = evaluate(model, X_test, Y_test, Q)
+        metrics["test_source"] = test_source
+        metrics["n_test_samples"] = len(X_test)
+        return metrics
+    elif len(X_val) >= min_samples:
+        metrics = evaluate(model, X_val, Y_val, Q)
+        metrics["test_source"] = "validation_as_test"
+        metrics["n_test_samples"] = len(X_val)
+        return metrics
+    else:
+        return {
+            "wi": np.nan, "rmse": np.nan, "mae": np.nan,
+            "wi_by_h": [np.nan] * Q, "test_source": "none", "n_test_samples": 0
+        }
 
-    if model is None:
-        return {"model_name": model_name, "P": P, "Q": Q, "metrics": {}, "model": None}
 
-    metrics = evaluate_autoregressive(model, X_val, Y_val_seq, P, Q)
+def run_classic(model_name: str, X_train: np.ndarray, Y_train_seq: np.ndarray,
+                X_val: np.ndarray, Y_val_seq: np.ndarray,
+                P: int, Q: int, n_iter: int = None, cv: int = None) -> dict:
+    """
+    Train and evaluate a classical ML model.
 
-    return {"model_name": model_name, "P": P, "Q": Q, "metrics": metrics, "model": model}
+    Args:
+        model_name: "RF" or "XGBoost"
+        X_train, Y_train_seq: Training data
+        X_val, Y_val_seq: Validation data
+        P: Input sequence length (for metadata)
+        Q: Output sequence length
+        n_iter: Hyperparameter search iterations
+        cv: Cross-validation folds
+
+    Returns:
+        dict: Results containing model, metrics, and best parameters
+    """
+    if len(X_train) == 0:
+        return {"model_name": model_name, "P": P, "Q": Q, "val_metrics": {}, "model": None}
+
+    model, best_params, cv_results = randomized_search(model_name, X_train, Y_train_seq, n_iter, cv)
+
+    return {
+        "model_name": model_name,
+        "P": P,
+        "Q": Q,
+        "val_metrics": evaluate(model, X_val, Y_val_seq, Q),
+        "model": model,
+        "best_params": best_params,
+        "cv_results": cv_results
+    }
+
+
+def predict_multioutput(model, X: np.ndarray, Q: int) -> np.ndarray:
+    """
+    Generate multi-step predictions using a trained model.
+
+    Args:
+        model: Trained sklearn model
+        X: Input features
+        Q: Number of output steps (for shape consistency)
+
+    Returns:
+        np.ndarray: Predictions with shape (n_samples, Q)
+    """
+    predictions = model.predict(X)
+    if predictions.ndim == 1:
+        predictions = predictions.reshape(-1, 1)
+    return predictions.astype(np.float32)
